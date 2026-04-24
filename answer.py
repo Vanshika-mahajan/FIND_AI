@@ -66,12 +66,23 @@ def fetch_context(question: str, retrieval_k: int = RETRIEVAL_K) -> list[Result]
     ensure_index_ready()
     collection = get_collection()
     query_vector = embed_query(question)
-    results = collection.query(query_embeddings=[query_vector], n_results=retrieval_k)
+    results = collection.query(
+        query_embeddings=[query_vector],
+        n_results=retrieval_k,
+        include=["documents", "metadatas", "distances"],
+    )
 
-    return [
-        Result(page_content=document, metadata=metadata)
-        for document, metadata in zip(results["documents"][0], results["metadatas"][0])
-    ]
+    chunks = []
+    for document, metadata, distance in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        metadata = dict(metadata)
+        metadata["distance"] = round(float(distance), 4)
+        metadata["relevance"] = round(1 / (1 + max(float(distance), 0)), 3)
+        chunks.append(Result(page_content=document, metadata=metadata))
+    return chunks
 
 
 def build_context(chunks: list[Result]) -> str:
