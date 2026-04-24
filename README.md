@@ -2,7 +2,7 @@
 
 FIND_AI is a local, open-source Retrieval-Augmented Generation (RAG) assistant for
 company documents. It indexes markdown files, retrieves the most relevant context,
-and answers questions using a local Ollama model.
+and answers questions using a local Ollama model through a polished Streamlit UI.
 
 ## Features
 
@@ -11,6 +11,7 @@ and answers questions using a local Ollama model.
 - Local embeddings with Sentence Transformers
 - Local vector storage with ChromaDB
 - Local chat generation with Ollama
+- Streamlit chat interface
 - Source-aware answers
 - No OpenAI key or hosted LLM required
 
@@ -19,6 +20,7 @@ and answers questions using a local Ollama model.
 ```text
 FIND_AI/
   answer.py                  # Ask questions using the RAG pipeline
+  app.py                     # Streamlit user interface
   ingest.py                  # Load, chunk, embed, and index documents
   requirements.txt           # Python dependencies
   .env.example               # Example local model settings
@@ -106,7 +108,7 @@ python3 ingest.py
 
 This creates a local ChromaDB vector database in `preprocessed_db/`.
 
-## Ask Questions
+## Launch The App
 
 Make sure Ollama is running:
 
@@ -117,7 +119,7 @@ ollama serve
 In another terminal, start the assistant:
 
 ```bash
-python3 answer.py
+streamlit run app.py
 ```
 
 Example:
@@ -128,14 +130,21 @@ You: What does the company knowledge base support?
 
 Type `exit` or `quit` to stop the assistant.
 
+You can still use the terminal chat version:
+
+```bash
+python3 answer.py
+```
+
 ## How It Works
 
 1. `ingest.py` reads markdown files from `knowledge-base/`.
 2. It splits each document into overlapping word chunks.
 3. It embeds chunks using `BAAI/bge-small-en-v1.5`.
 4. It stores embeddings and metadata in ChromaDB.
-5. `answer.py` embeds the user question and retrieves matching chunks.
-6. Ollama generates an answer using only the retrieved context.
+5. `app.py` provides the chat UI and source panel.
+6. `answer.py` embeds the user question and retrieves matching chunks.
+7. Ollama generates an answer using only the retrieved context.
 
 ## Notes
 

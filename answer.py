@@ -34,7 +34,6 @@ embedder = SentenceTransformer(EMBEDDING_MODEL)
 print("Embedding model ready.")
 
 chroma = PersistentClient(path=DB_NAME)
-collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
 
 @dataclass
@@ -43,8 +42,13 @@ class Result:
     metadata: dict
 
 
+def get_collection():
+    return chroma.get_or_create_collection(COLLECTION_NAME)
+
+
 def ensure_index_ready() -> None:
     """Fail clearly when the vector database has not been built yet."""
+    collection = get_collection()
     if collection.count() == 0:
         raise RuntimeError(
             "The RAG index is empty. Add markdown files under knowledge-base/ "
@@ -57,11 +61,12 @@ def embed_query(text: str) -> list[float]:
     return embedder.encode([text]).tolist()[0]
 
 
-def fetch_context(question: str) -> list[Result]:
+def fetch_context(question: str, retrieval_k: int = RETRIEVAL_K) -> list[Result]:
     """Retrieve the most relevant chunks from the local ChromaDB index."""
     ensure_index_ready()
+    collection = get_collection()
     query_vector = embed_query(question)
-    results = collection.query(query_embeddings=[query_vector], n_results=RETRIEVAL_K)
+    results = collection.query(query_embeddings=[query_vector], n_results=retrieval_k)
 
     return [
         Result(page_content=document, metadata=metadata)
@@ -94,11 +99,11 @@ Question:
     return [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_prompt}]
 
 
-def call_ollama(messages: list[dict]) -> str:
+def call_ollama(messages: list[dict], model: str = OLLAMA_MODEL) -> str:
     """Call a local Ollama chat model."""
     url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model,
         "messages": messages,
         "stream": False,
     }
@@ -109,7 +114,7 @@ def call_ollama(messages: list[dict]) -> str:
     except requests.ConnectionError as exc:
         raise RuntimeError(
             "Could not connect to Ollama. Start it with `ollama serve` and "
-            f"pull the model with `ollama pull {OLLAMA_MODEL}`."
+            f"pull the model with `ollama pull {model}`."
         ) from exc
     except requests.HTTPError as exc:
         raise RuntimeError(f"Ollama returned an error: {response.text}") from exc
@@ -118,12 +123,17 @@ def call_ollama(messages: list[dict]) -> str:
     return data["message"]["content"].strip()
 
 
-def answer_question(question: str, history: Optional[list[dict]] = None) -> tuple[str, list[Result]]:
+def answer_question(
+    question: str,
+    history: Optional[list[dict]] = None,
+    model: str = OLLAMA_MODEL,
+    retrieval_k: int = RETRIEVAL_K,
+) -> tuple[str, list[Result]]:
     """Answer a question using local RAG and a local open-source chat model."""
     history = history or []
-    chunks = fetch_context(question)
+    chunks = fetch_context(question, retrieval_k=retrieval_k)
     messages = build_messages(question, history, chunks)
-    answer = call_ollama(messages)
+    answer = call_ollama(messages, model=model)
 
     sources = sorted({chunk.metadata.get("source", "unknown") for chunk in chunks})
     answer_with_sources = answer + "\n\n---\nSources consulted: " + ", ".join(sources)

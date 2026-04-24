@@ -2,4 +2,5 @@ chromadb
 python-dotenv
 requests
 sentence-transformers
+streamlit
 tqdm
