@@ -1,0 +1,19 @@
+.env
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+preprocessed_db/
+chroma/
+
+.DS_Store
+
+# Local model/cache artifacts can become very large.
+models/
+.cache/

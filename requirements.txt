@@ -1,0 +1,7 @@
+chromadb
+litellm
+python-dotenv
+pydantic
+sentence-transformers
+tenacity
+tqdm
