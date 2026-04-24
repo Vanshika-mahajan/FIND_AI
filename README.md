@@ -43,7 +43,7 @@ https://ollama.com
 Pull an open-source chat model:
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull llama3.2:3b
 ```
 
 You can use another Ollama model by changing `OLLAMA_MODEL` in `.env`.
@@ -74,7 +74,7 @@ Default settings:
 ```bash
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.1:8b
+OLLAMA_MODEL=llama3.2:3b
 RETRIEVAL_K=8
 CHUNK_WORDS=350
 CHUNK_OVERLAP=80
