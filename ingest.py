@@ -1,77 +1,39 @@
 import hashlib
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+
 from chromadb import PersistentClient
-from tqdm import tqdm
-from litellm import completion
-from multiprocessing import Pool
-from tenacity import retry, wait_exponential
+from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 
 load_dotenv(override=True)
 
-# Open-source models via Groq (free tier: ~30 req/min)
-# Sign up at console.groq.com and set GROQ_API_KEY in your .env
-SMALL_MODEL = "groq/llama-3.1-8b-instant"     # fast, used for chunking
-LARGE_MODEL = "groq/llama-3.3-70b-versatile"  # stronger, used if needed
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 DB_NAME = str(PROJECT_ROOT / "preprocessed_db")
 KNOWLEDGE_BASE_PATH = PROJECT_ROOT / "knowledge-base"
-collection_name = "docs"
-AVERAGE_CHUNK_SIZE = 1200
-BATCH_SIZE = 64   # embedding batch size - tune down if you hit memory limits
-WORKERS = 3       # parallel document workers - set to 1 if rate limited
+COLLECTION_NAME = "docs"
 
-wait = wait_exponential(multiplier=1, min=10, max=240)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+CHUNK_WORDS = int(os.getenv("CHUNK_WORDS", "350"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "64"))
 
-# Embedding model - downloads ~2GB on first run, cached locally after that.
-# BAAI/bge-m3 is multilingual and close in quality to text-embedding-3-large.
-print("Loading embedding model (first run downloads ~2 GB)...")
-embedder = SentenceTransformer("BAAI/bge-m3")
+print(f"Loading embedding model: {EMBEDDING_MODEL}")
+embedder = SentenceTransformer(EMBEDDING_MODEL)
 print("Embedding model ready.")
 
 
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
-
-class Result(BaseModel):
+@dataclass
+class Result:
     page_content: str
     metadata: dict
 
 
-class Chunk(BaseModel):
-    headline: str = Field(
-        description="A brief heading for this chunk, typically a few words, that is most likely to be surfaced in a query",
-    )
-    summary: str = Field(
-        description="A few sentences summarizing the content of this chunk to answer common questions"
-    )
-    original_text: str = Field(
-        description="The original text of this chunk from the provided document, exactly as is, not changed in any way"
-    )
-
-    def as_result(self, document):
-        metadata = {"source": document["source"], "type": document["type"]}
-        return Result(
-            page_content=self.headline + "\n\n" + self.summary + "\n\n" + self.original_text,
-            metadata=metadata,
-        )
-
-
-class Chunks(BaseModel):
-    chunks: list[Chunk]
-
-
-# ---------------------------------------------------------------------------
-# Document loading
-# ---------------------------------------------------------------------------
-
-def fetch_documents():
-    """Load all .md files from the knowledge base directory tree."""
+def fetch_documents() -> list[dict]:
+    """Load all markdown files from the knowledge base directory tree."""
     if not KNOWLEDGE_BASE_PATH.exists():
         raise FileNotFoundError(
             f"Knowledge base folder not found: {KNOWLEDGE_BASE_PATH}\n"
@@ -86,12 +48,17 @@ def fetch_documents():
             continue
         doc_type = folder.name
         for file in folder.rglob("*.md"):
-            with open(file, "r", encoding="utf-8") as f:
-                documents.append({
+            text = file.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+            documents.append(
+                {
                     "type": doc_type,
-                    "source": file.as_posix(),
-                    "text": f.read(),
-                })
+                    "source": file.relative_to(PROJECT_ROOT).as_posix(),
+                    "text": text,
+                }
+            )
+
     if not documents:
         raise FileNotFoundError(
             f"No markdown files found under {KNOWLEDGE_BASE_PATH}.\n"
@@ -102,112 +69,75 @@ def fetch_documents():
     return documents
 
 
-# ---------------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------------
+def chunk_text(text: str, chunk_words: int = CHUNK_WORDS, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split text into overlapping word chunks without requiring an LLM."""
+    words = text.split()
+    if not words:
+        return []
+    if chunk_words <= overlap:
+        raise ValueError("CHUNK_WORDS must be greater than CHUNK_OVERLAP")
 
-def make_prompt(document):
-    how_many = max(1, (len(document["text"]) // AVERAGE_CHUNK_SIZE) + 1)
-    return f"""
-You take a document and split it into overlapping chunks for a KnowledgeBase.
-
-The document is from the shared drive of a company.
-The document type is: {document["type"]}
-Retrieved from: {document["source"]}
-
-A chatbot will use these chunks to answer questions about the company.
-Divide the document as you see fit, ensuring the entire document is covered - don't leave anything out.
-This document should probably be split into at least {how_many} chunks, but you can use more or fewer as appropriate.
-There should be ~25% overlap between adjacent chunks (about 50 words) for best retrieval results.
-
-For each chunk, provide:
-- headline: a brief heading (a few words)
-- summary: a few sentences summarizing the chunk
-- original_text: the original text of the chunk, exactly as written
-
-Together, your chunks must represent the entire document with overlap.
-
-Here is the document:
-
-{document["text"]}
-
-Respond with the chunks.
-"""
-
-
-def make_messages(document):
-    return [{"role": "user", "content": make_prompt(document)}]
-
-
-@retry(wait=wait)
-def process_document(document):
-    messages = make_messages(document)
-    response = completion(model=SMALL_MODEL, messages=messages, response_format=Chunks)
-    reply = response.choices[0].message.content
-    doc_as_chunks = Chunks.model_validate_json(reply).chunks
-    return [chunk.as_result(document) for chunk in doc_as_chunks]
-
-
-def create_chunks(documents):
-    """
-    Chunk documents in parallel.
-    Set WORKERS=1 if you hit Groq rate limits.
-    """
     chunks = []
-    with Pool(processes=WORKERS) as pool:
-        for result in tqdm(
-            pool.imap_unordered(process_document, documents),
-            total=len(documents),
-            desc="Chunking documents",
-        ):
-            chunks.extend(result)
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_words, len(words))
+        chunks.append(" ".join(words[start:end]))
+        if end == len(words):
+            break
+        start = end - overlap
+    return chunks
+
+
+def create_chunks(documents: list[dict]) -> list[Result]:
+    """Create retrieval chunks from loaded documents."""
+    chunks = []
+    for document in documents:
+        for index, text in enumerate(chunk_text(document["text"])):
+            chunks.append(
+                Result(
+                    page_content=text,
+                    metadata={
+                        "source": document["source"],
+                        "type": document["type"],
+                        "chunk": index,
+                    },
+                )
+            )
+
     print(f"Created {len(chunks)} chunks total")
     return chunks
 
 
-# ---------------------------------------------------------------------------
-# Embeddings - batched to handle large datasets
-# ---------------------------------------------------------------------------
-
 def batch_embed(texts: list[str]) -> list[list[float]]:
-    """
-    Embed texts in batches using the local sentence-transformers model.
-    Returns a list of float vectors.
-    """
+    """Embed texts in batches using the local sentence-transformers model."""
     all_vectors = []
     for i in tqdm(range(0, len(texts), BATCH_SIZE), desc="Embedding chunks"):
         batch = texts[i : i + BATCH_SIZE]
-        vecs = embedder.encode(batch, show_progress_bar=False).tolist()
-        all_vectors.extend(vecs)
+        vectors = embedder.encode(batch, show_progress_bar=False).tolist()
+        all_vectors.extend(vectors)
     return all_vectors
 
 
-def create_embeddings(chunks: list[Result]):
+def create_embeddings(chunks: list[Result]) -> None:
     """Embed all chunks and store them in ChromaDB."""
     chroma = PersistentClient(path=DB_NAME)
 
-    # Drop existing collection so we start fresh on re-ingest
-    if collection_name in [c.name for c in chroma.list_collections()]:
-        chroma.delete_collection(collection_name)
+    if COLLECTION_NAME in [c.name for c in chroma.list_collections()]:
+        chroma.delete_collection(COLLECTION_NAME)
 
     texts = [chunk.page_content for chunk in chunks]
     vectors = batch_embed(texts)
-
-    collection = chroma.get_or_create_collection(collection_name)
+    collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     ids = [
-        hashlib.sha1(f"{chunk.metadata['source']}:{i}:{chunk.page_content}".encode("utf-8")).hexdigest()
-        for i, chunk in enumerate(chunks)
+        hashlib.sha1(f"{chunk.metadata['source']}:{chunk.metadata['chunk']}:{text}".encode("utf-8")).hexdigest()
+        for chunk, text in zip(chunks, texts)
     ]
-    metas = [chunk.metadata for chunk in chunks]
+    metadatas = [chunk.metadata for chunk in chunks]
 
-    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
-    print(f"Vectorstore created with {collection.count()} documents")
+    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+    print(f"Vector store created with {collection.count()} chunks")
 
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     documents = fetch_documents()

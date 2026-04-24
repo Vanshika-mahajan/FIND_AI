@@ -1,7 +1,5 @@
 chromadb
-litellm
 python-dotenv
-pydantic
+requests
 sentence-transformers
-tenacity
 tqdm
